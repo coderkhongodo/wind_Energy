@@ -1727,6 +1727,205 @@ def ceemdan_ewt_transformer(new_data,i,look_back,data_partition,cap):
     print('MAE',mae)
 
 
+# ---------------------------------------------------------------------------
+# CEEMDAN-EWT + CNN variants
+
+def _ceemdan_ewt_cnn_pipeline(new_data,i,look_back,data_partition,cap,build_model_fn):
+
+    import numpy as np
+    import pandas as pd
+    from PyEMD import CEEMDAN
+    import ewtpy
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import mean_squared_error
+    from math import sqrt
+    import sklearn.metrics as metrics
+    import tensorflow as tf
+    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.losses import Huber
+    import os
+
+    x=i
+    data1=new_data.loc[new_data['month'].isin(x)]
+    data1=data1.reset_index(drop=True)
+    data1=data1.dropna()
+
+    datas=data1['LV ActivePower (kW)']
+    dfs=datas
+    s = dfs.values
+
+    emd = CEEMDAN(epsilon=0.05)
+    emd.noise_seed(12345)
+    IMFs = emd(s)
+    full_imf=pd.DataFrame(IMFs)
+    ceemdan1=full_imf.T
+
+    imf1=ceemdan1.iloc[:,0]
+    ewt,  _, _ = ewtpy.EWT1D(np.array(imf1), N =3)
+    df_ewt=pd.DataFrame(ewt)
+    if df_ewt.shape[1] >= 3:
+        df_ewt.drop(df_ewt.columns[2],axis=1,inplace=True)
+    denoised=df_ewt.sum(axis = 1, skipna = True)
+    ceemdan_without_imf1=ceemdan1.iloc[:,1:]
+    new_ceemdan=pd.concat([denoised,ceemdan_without_imf1],axis=1)
+
+    pred_test=[]
+
+    epoch=100
+    batch_size=64
+    learning_rate=0.001
+
+    for col in new_ceemdan:
+        datasetss2=pd.DataFrame(new_ceemdan[col])
+        datasets=datasetss2.values
+        train_size = int(len(datasets) * data_partition)
+        test_size = len(datasets) - train_size
+        train, test = datasets[0:train_size], datasets[train_size:len(datasets)]
+
+        trainX, trainY = create_dataset(train, look_back)
+        testX, testY = create_dataset(test, look_back)
+
+        if len(trainX) == 0 or len(testX) == 0:
+            continue
+
+        sc_X = StandardScaler()
+        sc_y = StandardScaler()
+
+        X_train_sc= sc_X.fit_transform(pd.DataFrame(trainX))
+        y_train_sc= sc_y.fit_transform(pd.DataFrame(trainY))
+        X_test_sc= sc_X.transform(pd.DataFrame(testX))
+        y_test_sc= sc_y.transform(pd.DataFrame(testY))
+
+        y_train_sc=y_train_sc.ravel()
+        y_test_sc=y_test_sc.ravel()
+
+        X_train_final = np.reshape(X_train_sc, (X_train_sc.shape[0], X_train_sc.shape[1],1))
+        X_test_final = np.reshape(X_test_sc, (X_test_sc.shape[0], X_test_sc.shape[1],1))
+
+        np.random.seed(1234)
+        tf.random.set_seed(1234)
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError:
+                pass
+
+        model = build_model_fn((X_train_final.shape[1], X_train_final.shape[2]))
+        model.compile(loss=Huber(), optimizer=Adam(learning_rate=learning_rate))
+
+        model.fit(X_train_final, y_train_sc, epochs=epoch, batch_size=batch_size, verbose=0)
+
+        y_pred_train_sc = model.predict(X_train_final)
+        y_pred_test_sc = model.predict(X_test_final)
+
+        y_pred_test = sc_y.inverse_transform(y_pred_test_sc).ravel()
+
+        y_pred_test[y_pred_test < 0] = 0
+
+        pred_test.append(pd.Series(y_pred_test))
+
+    if not pred_test:
+        raise ValueError("CEEMDAN-EWT-CNN: không đủ dữ liệu để huấn luyện.")
+
+    result_pred_test = pd.concat(pred_test, axis=1).fillna(0.0)
+
+    a = result_pred_test.sum(axis = 1, skipna = True).values
+
+    dataframe=pd.DataFrame(dfs)
+    dataset=dataframe.values
+
+    train_size = int(len(dataset) * data_partition)
+    test_size = len(dataset) - train_size
+    train, test = dataset[0:train_size], dataset[train_size:len(dataset)]
+
+    _, testY_orig = create_dataset(test, look_back)
+    y_test_final = np.array(testY_orig).ravel()
+
+    min_len = min(len(y_test_final), len(a))
+    y_test_final = y_test_final[:min_len]
+    a = a[:min_len]
+
+    mape=np.mean((np.abs(y_test_final-a))/cap)*100
+    rmse= sqrt(mean_squared_error(y_test_final,a))
+    mae=metrics.mean_absolute_error(y_test_final,a)
+
+    print('MAPE:',mape)
+    print('RMSE:',rmse)
+    print('MAE:',mae)
+
+    return mape, rmse, mae
+
+
+def ceemdan_ewt_cnn(new_data,i,look_back,data_partition,cap):
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.layers import Input, Conv1D, MaxPooling1D, Dropout, GlobalAveragePooling1D, Dense, LeakyReLU
+
+    def build_model(input_shape):
+        inputs = Input(shape=input_shape)
+        x = Conv1D(filters=64, kernel_size=3, padding='same')(inputs)
+        x = LeakyReLU(alpha=0.01)(x)
+        x = MaxPooling1D(pool_size=2)(x)
+        x = Dropout(0.2)(x)
+        x = Conv1D(filters=64, kernel_size=3, padding='same')(x)
+        x = LeakyReLU(alpha=0.01)(x)
+        x = GlobalAveragePooling1D()(x)
+        x = Dense(64)(x)
+        x = LeakyReLU(alpha=0.01)(x)
+        x = Dropout(0.2)(x)
+        outputs = Dense(1, activation='linear')(x)
+        return Model(inputs=inputs, outputs=outputs)
+
+    return _ceemdan_ewt_cnn_pipeline(new_data,i,look_back,data_partition,cap,build_model)
+
+
+def ceemdan_ewt_cnn_lstm_attention(new_data,i,look_back,data_partition,cap):
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.layers import Input, Dense, LSTM, Conv1D, MaxPooling1D, Dropout, Attention, GlobalAveragePooling1D, LeakyReLU
+
+    def build_model(input_shape):
+        inputs = Input(shape=input_shape)
+        x = Conv1D(filters=64, kernel_size=3, padding='same')(inputs)
+        x = LeakyReLU(alpha=0.01)(x)
+        x = MaxPooling1D(pool_size=2)(x)
+        x = Dropout(0.2)(x)
+        lstm_out = LSTM(units=128, return_sequences=True)(x)
+        attn_out = Attention()([lstm_out, lstm_out])
+        gap = GlobalAveragePooling1D()(attn_out)
+        dense = Dense(64)(gap)
+        dense = LeakyReLU(alpha=0.01)(dense)
+        dense = Dropout(0.2)(dense)
+        outputs = Dense(1, activation='linear')(dense)
+        return Model(inputs=inputs, outputs=outputs)
+
+    return _ceemdan_ewt_cnn_pipeline(new_data,i,look_back,data_partition,cap,build_model)
+
+
+def ceemdan_ewt_cnn_gru_attention(new_data,i,look_back,data_partition,cap):
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.layers import Input, Dense, GRU, Conv1D, MaxPooling1D, Dropout, Attention, GlobalAveragePooling1D, LeakyReLU
+
+    def build_model(input_shape):
+        inputs = Input(shape=input_shape)
+        x = Conv1D(filters=64, kernel_size=3, padding='same')(inputs)
+        x = LeakyReLU(alpha=0.01)(x)
+        x = MaxPooling1D(pool_size=2)(x)
+        x = Dropout(0.2)(x)
+        gru_out = GRU(units=128, return_sequences=True)(x)
+        attn_out = Attention()([gru_out, gru_out])
+        gap = GlobalAveragePooling1D()(attn_out)
+        dense = Dense(64)(gap)
+        dense = LeakyReLU(alpha=0.01)(dense)
+        dense = Dropout(0.2)(dense)
+        outputs = Dense(1, activation='linear')(dense)
+        return Model(inputs=inputs, outputs=outputs)
+
+    return _ceemdan_ewt_cnn_pipeline(new_data,i,look_back,data_partition,cap,build_model)
+
+
 # In[10]:
 
 
