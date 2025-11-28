@@ -389,7 +389,82 @@ def lstm_model(new_data,i,look_back,data_partition,cap):
     print('MAE',mae)
 
 
-# In[24]:
+##Bi-GRU
+def bigru_model(new_data,i,look_back,data_partition,cap):
+
+    from keras.layers import GRU, Bidirectional
+    x=i
+    data1=new_data.loc[new_data['Month'].isin(x)]
+    data1=data1.reset_index(drop=True)
+    data1=data1.dropna()
+    
+    datas=data1['P_avg']
+    dfs=datas
+    s = dfs.values
+    
+    datasetss2=pd.DataFrame(s)
+    datasets=datasetss2.values
+    
+    train_size = int(len(datasets) * data_partition)
+    test_size = len(datasets) - train_size
+    train, test = datasets[0:train_size], datasets[train_size:len(datasets)]
+
+    trainX, trainY = create_dataset(train, look_back)
+    testX, testY = create_dataset(test, look_back)
+    X_train=pd.DataFrame(trainX)
+    Y_train=pd.DataFrame(trainY)
+    X_test=pd.DataFrame(testX)
+    Y_test=pd.DataFrame(testY)
+    sc_X = StandardScaler()
+    sc_y = StandardScaler()
+
+    X= sc_X.fit_transform(X_train)
+    y= sc_y.fit_transform(Y_train)
+    X1= sc_X.fit_transform(X_test)
+    y1= sc_y.fit_transform(Y_test)
+    y=y.ravel()
+    y1=y1.ravel()  
+
+    numpy.random.seed(1234)
+    tf.random.set_seed(1234)
+
+    trainX1 = numpy.reshape(X, (X.shape[0], 1, X.shape[1]))
+    testX1 = numpy.reshape(X1, (X1.shape[0], 1, X1.shape[1]))
+
+    numpy.random.seed(1234)
+    tf.random.set_seed(1234)
+
+    import os 
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+    from keras.models import Sequential
+    from keras.layers.core import Dense
+
+    neuron=128
+    model = Sequential()
+    model.add(Bidirectional(GRU(units = neuron),input_shape=(trainX1.shape[1], trainX1.shape[2])))
+    model.add(Dense(1))
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+    model.compile(loss='mse',optimizer=optimizer)
+
+    model.fit(trainX1, y, epochs = 100, batch_size = 64,verbose=0)
+    y_pred_train = model.predict(trainX1)
+    y_pred_test = model.predict(testX1)
+    y_pred_test= numpy.array(y_pred_test).ravel()
+
+    y_pred_test=pd.DataFrame(y_pred_test)
+    y_pred_test1= sc_y.inverse_transform (y_pred_test)
+    y1=pd.DataFrame(y1)
+      
+    y_test= sc_y.inverse_transform (y1)
+       
+    mape=numpy.mean((numpy.abs(y_test-y_pred_test1))/cap)*100
+    rmse= sqrt(mean_squared_error(y_test,y_pred_test1))
+    mae=metrics.mean_absolute_error(y_test,y_pred_test1)
+
+    
+    print('MAPE',mape)
+    print('RMSE',rmse)
+    print('MAE',mae)
 
 
 ##HYBRID EMD LSTM
@@ -1496,6 +1571,199 @@ def ceemdan_ewt_bilstm(new_data,i,look_back,data_partition,cap):
 
 
     #summarize the fit of the model
+    mape=numpy.mean((numpy.abs(y_test-a))/cap)*100
+    rmse= sqrt(mean_squared_error(y_test,a))
+    mae=metrics.mean_absolute_error(y_test,a)
+
+    
+    print('MAPE',mape.to_string())
+    print('RMSE',rmse)
+    print('MAE',mae)
+
+
+##Proposed Method Hybrid CEEMDAN-EWT với Bidirectional GRU
+def ceemdan_ewt_bigru(new_data,i,look_back,data_partition,cap):
+
+    x=i
+    data1=new_data.loc[new_data['Month'].isin(x)]
+    data1=data1.reset_index(drop=True)
+    data1=data1.dropna()
+    
+    datas=data1['P_avg']
+    dfs=datas
+    s = dfs.values
+
+    from PyEMD import EMD,EEMD,CEEMDAN
+    import numpy
+
+    emd = CEEMDAN(epsilon=0.05)
+    emd.noise_seed(12345)
+
+    IMFs = emd(s)
+
+    full_imf=pd.DataFrame(IMFs)
+    ceemdan1=full_imf.T
+    
+    imf1=ceemdan1.iloc[:,0]
+    imf_dataps=numpy.array(imf1)
+    imf_datasetss= imf_dataps.reshape(-1,1)
+    imf_new_datasets=pd.DataFrame(imf_datasetss)
+
+    import ewtpy
+
+    ewt,  mfb ,boundaries = ewtpy.EWT1D(imf1, N =3)
+    df_ewt=pd.DataFrame(ewt)
+
+    if df_ewt.shape[1] >= 3:
+        df_ewt.drop(df_ewt.columns[2],axis=1,inplace=True)
+    denoised=df_ewt.sum(axis = 1, skipna = True) 
+    ceemdan_without_imf1=ceemdan1.iloc[:,1:]
+    new_ceemdan=pd.concat([denoised,ceemdan_without_imf1],axis=1)    
+    
+
+    pred_test=[]
+    test_ori=[]
+    pred_train=[]
+    train_ori=[]
+
+    epoch=100
+    batch_size=64
+    lr=0.001
+    optimizer='Adam'
+
+    for col in new_ceemdan:
+
+        datasetss2=pd.DataFrame(new_ceemdan[col])
+        datasets=datasetss2.values
+        train_size = int(len(datasets) * data_partition)
+        test_size = len(datasets) - train_size
+        train, test = datasets[0:train_size], datasets[train_size:len(datasets)]
+
+        trainX, trainY = create_dataset(train, look_back)
+        testX, testY = create_dataset(test, look_back)
+        X_train=pd.DataFrame(trainX)
+        Y_train=pd.DataFrame(trainY)
+        X_test=pd.DataFrame(testX)
+        Y_test=pd.DataFrame(testY)
+        sc_X = StandardScaler()
+        sc_y = StandardScaler()
+        X= sc_X.fit_transform(X_train)
+        y= sc_y.fit_transform(Y_train)
+        X1= sc_X.fit_transform(X_test)
+        y1= sc_y.fit_transform(Y_test)
+        y=y.ravel()
+        y1=y1.ravel()  
+
+        import numpy
+
+        trainX = numpy.reshape(X, (X.shape[0], X.shape[1],1))
+        testX = numpy.reshape(X1, (X1.shape[0], X1.shape[1],1))
+
+        numpy.random.seed(1234)
+        import tensorflow as tf
+        tf.random.set_seed(1234)
+
+        
+    
+        import os 
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+        
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+            except RuntimeError as e:
+                pass
+        
+        from keras.models import Sequential
+        from keras.layers.core import Dense
+        from keras.layers import GRU, Bidirectional
+
+
+        neuron=128
+        model = Sequential()
+        model.add(Bidirectional(GRU(units = neuron),input_shape=(trainX.shape[1], trainX.shape[2])))
+        model.add(Dense(1))
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+        model.compile(loss='mse',optimizer=optimizer)
+
+
+        model.fit(trainX, y, epochs = epoch, batch_size = batch_size,verbose=0)
+
+         # make predictions
+        y_pred_train = model.predict(trainX)
+        y_pred_test = model.predict(testX)
+        
+        y_pred_test= numpy.array(y_pred_test).ravel()
+        y_pred_test=pd.DataFrame(y_pred_test)
+        y1=pd.DataFrame(y1)
+        y=pd.DataFrame(y)
+        y_pred_train= numpy.array(y_pred_train).ravel()
+        y_pred_train=pd.DataFrame(y_pred_train)
+
+        y_test= sc_y.inverse_transform (y1)
+        y_train= sc_y.inverse_transform (y)
+
+        y_pred_test1= sc_y.inverse_transform (y_pred_test)
+        y_pred_train1= sc_y.inverse_transform (y_pred_train)
+
+
+        pred_test.append(y_pred_test1)
+        test_ori.append(y_test)
+        pred_train.append(y_pred_train1)
+        train_ori.append(y_train)
+
+
+    result_pred_test= pd.DataFrame.from_records(pred_test)
+    result_pred_train= pd.DataFrame.from_records(pred_train)
+
+
+    a=result_pred_test.sum(axis = 0, skipna = True) 
+    b=result_pred_train.sum(axis = 0, skipna = True) 
+
+
+    dataframe=pd.DataFrame(dfs)
+    dataset=dataframe.values
+
+    train_size = int(len(dataset) * data_partition)
+    test_size = len(dataset) - train_size
+    train, test = dataset[0:train_size], dataset[train_size:len(dataset)]
+
+    trainX, trainY = create_dataset(train, look_back)
+    testX, testY = create_dataset(test, look_back)
+    X_train=pd.DataFrame(trainX)
+    Y_train=pd.DataFrame(trainY)
+    X_test=pd.DataFrame(testX)
+    Y_test=pd.DataFrame(testY)
+
+    sc_X = StandardScaler()
+    sc_y = StandardScaler() 
+    X= sc_X.fit_transform(X_train)
+    y= sc_y.fit_transform(Y_train)
+    X1= sc_X.fit_transform(X_test)
+    y1= sc_y.fit_transform(Y_test)
+    y=y.ravel()
+    y1=y1.ravel()
+
+
+    trainX = numpy.reshape(X, (X.shape[0], 1, X.shape[1]))
+    testX = numpy.reshape(X1, (X1.shape[0], 1, X1.shape[1]))
+
+    numpy.random.seed(1234)
+    tf.random.set_seed(1234)
+    
+    y1=pd.DataFrame(y1)
+    y=pd.DataFrame(y)
+
+    y_test= sc_y.inverse_transform (y1)
+    y_train= sc_y.inverse_transform (y)
+
+
+    a= pd.DataFrame(a)    
+    y_test= pd.DataFrame(y_test)    
+
+
     mape=numpy.mean((numpy.abs(y_test-a))/cap)*100
     rmse= sqrt(mean_squared_error(y_test,a))
     mae=metrics.mean_absolute_error(y_test,a)
